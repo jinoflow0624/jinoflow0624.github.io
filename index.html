@@ -138,7 +138,10 @@
         <div id="chainTable"></div>
         <div id="playerList"></div>
       </div>
-      <div id="tab-log" class="side-body" hidden><div id="logList" class="log-list"></div></div>
+      <div id="tab-log" class="side-body" hidden>
+        <div id="logList" class="log-list"></div>
+        <button id="logToggle" class="btn btn-small log-toggle" type="button" hidden></button>
+      </div>
       <div id="tab-chat" class="side-body" hidden>
         <div id="chatList" class="log-list"></div>
         <form id="chatForm" class="chat-form">
@@ -151,6 +154,8 @@
 </div>
 
 <div id="toast" class="toast" hidden></div>
+
+<div id="fxNotes" class="fx-notes" aria-live="polite"></div>
 
 <dialog id="fxDialog" class="fx-dialog">
   <div id="fxBody"></div>

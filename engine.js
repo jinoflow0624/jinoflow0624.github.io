@@ -427,6 +427,10 @@ function actFound(state, playerIdx, action) {
     bonus = ', 창립 보너스 주식 1장';
   }
   log(state, `→ ${player.name}이(가) ${chainInfo(id).ko} 창립 (${size}칸${bonus})`);
+  emit(state, {
+    type: 'found', chain: id, by: player.name, size,
+    price: stockPrice(id, size), bonus: !!bonus,
+  });
   return toBuyPhase(state);
 }
 
@@ -621,12 +625,14 @@ function actBuy(state, playerIdx, action) {
   if (cost > player.money) return fail('현금이 부족합니다.');
 
   const bought = [];
+  const picked = [];
   for (const [id, raw] of Object.entries(picks)) {
     const n = Math.max(0, Math.floor(raw || 0));
     if (n === 0) continue;
     state.pool[id] -= n;
     player.shares[id] += n;
     bought.push(`${chainInfo(id).ko} ${n}장`);
+    picked.push({ chain: id, count: n });
   }
   if (cost > 0) {
     player.money -= cost;
@@ -634,6 +640,11 @@ function actBuy(state, playerIdx, action) {
     log(state, state.privateShares
       ? `${player.name}: 주식 ${count}장 구매 (-$${cost.toLocaleString()})`
       : `${player.name}: ${bought.join(', ')} 구매 (-$${cost.toLocaleString()})`);
+    // 알림도 같은 원칙 — 비공개 모드에서는 종목을 싣지 않는다
+    emit(state, {
+      type: 'buy', by: player.name, count, cost,
+      picks: state.privateShares ? null : picked,
+    });
   }
 
   if (action.declareEnd) {

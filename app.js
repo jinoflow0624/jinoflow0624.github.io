@@ -25,6 +25,13 @@ const ui = {
   wasMyTurn: false, // 내 차례 전환을 감지하기 위한 이전 상태
   endAsked: false,  // 종료 선언 팝업을 이미 띄웠는지
   endShown: false,  // 최종 결과 팝업을 이미 띄웠는지
+  logAll: false,      // 기록을 전부 펼쳤는지
+  // 새로 뽑힌 타일을 가려내려면 직전 손패가 필요하다.
+  // 로컬 모드는 매 턴 보는 사람이 바뀌므로 플레이어별로 따로 기억한다.
+  prevHandBy: {},     // 플레이어별 직전 손패
+  newTilesBy: {},     // 플레이어별 방금 들어온 타일
+  lastPlacedBy: {},   // 플레이어별 마지막으로 놓은 타일 (되돌려 받은 것을 새 타일로 오인하지 않게)
+  curMe: -1,          // 지금 화면의 주인
 };
 
 // ── 화면 전환 ────────────────────────────────────────────────────────────────
@@ -92,6 +99,7 @@ function leaveRoom() {
   Object.assign(ui, {
     selTile: null, buy: {}, dispose: { sell: 0, trade: 0 },
     seenEvent: 0, seenChat: 0, chatInit: false, unread: 0, wasMyTurn: false,
+    prevHandBy: {}, newTilesBy: {}, lastPlacedBy: {}, curMe: -1, logAll: false,
     endAsked: false, endShown: false, prevBoard: null, lastTile: null,
   });
   history.replaceState(null, '', location.pathname);
@@ -268,21 +276,35 @@ function placeSelected() {
   if (ui.selTile == null) return;
   const tile = ui.selTile;
   ui.selTile = null;
+  ui.lastPlacedBy[ui.curMe] = tile;   // 되돌렸을 때 이 타일을 '새로 들어온 것'으로 보지 않게
   room.localAct({ type: 'place', tile });
 }
 
 function renderHand(v) {
   const state = v.state;
-  const hand = $('hand');
-  hand.replaceChildren();
+  const handEl = $('hand');
+  handEl.replaceChildren();
   const me = state.players[v.me];
-  if (!me || !me.hand) { hand.append(el('span', 'hand-note', '관전 중')); return; }
+  if (!me || !me.hand) { handEl.append(el('span', 'hand-note', '관전 중')); return; }
 
   const acting = E.actingPlayer(state);
   const offline = v.status && v.status !== 'ok';
   const myPlacePhase = state.phase === 'place' && acting === v.me && !offline;
 
-  for (const tile of me.hand) {
+  // 손패가 바뀌었을 때, 직전에 없던 타일을 '새로 들어온 것'으로 표시한다.
+  // 되돌리기로 손에 돌아온 타일은 방금 놓았던 것이므로 제외한다.
+  const hand = me.hand;
+  const prev = ui.prevHandBy[v.me];
+  if (prev === undefined) {
+    ui.prevHandBy[v.me] = hand.slice();   // 이 플레이어를 처음 볼 때는 전부 새것으로 치지 않는다
+  } else if (hand.join() !== prev.join()) {
+    const added = hand.filter(t => !prev.includes(t) && t !== ui.lastPlacedBy[v.me]);
+    if (added.length) ui.newTilesBy[v.me] = added;
+    ui.prevHandBy[v.me] = hand.slice();
+  }
+  const newTiles = ui.newTilesBy[v.me] || [];
+
+  for (const tile of hand) {
     const status = E.tileStatus(state, tile);
     const b = el('button', 'tile', E.tileName(tile));
     b.type = 'button';
@@ -296,9 +318,13 @@ function renderHand(v) {
       if (ui.selTile === tile) b.classList.add('sel');
       b.onclick = () => { ui.selTile = ui.selTile === tile ? null : tile; render(); };
     }
-    hand.append(b);
+    if (newTiles.includes(tile)) {
+      b.classList.add('fresh');
+      b.title = '방금 들어온 타일';
+    }
+    handEl.append(b);
   }
-  hand.append(el('span', 'hand-note', `· 남은 타일 ${state.bagCount ?? 0}개`));
+  handEl.append(el('span', 'hand-note', `· 남은 타일 ${state.bagCount ?? 0}개`));
 }
 
 // ── 액션 패널 ────────────────────────────────────────────────────────────────
@@ -657,10 +683,26 @@ function renderPlayers(v) {
   });
 }
 
+const LOG_VISIBLE = 5;   // 기본으로 보여줄 최근 기록 줄 수
+
 function renderLog(v) {
   const list = $('logList');
   list.replaceChildren();
-  for (const entry of v.state.log) list.append(el('div', null, entry.msg));
+  const all = v.state.log;
+  const shown = ui.logAll ? all : all.slice(-LOG_VISIBLE);
+  for (const entry of shown) list.append(el('div', null, entry.msg));
+
+  // 가려진 줄이 있으면 펼쳐 볼 수 있게 한다
+  const hidden = all.length - shown.length;
+  const toggle = $('logToggle');
+  if (ui.logAll) {
+    toggle.hidden = all.length <= LOG_VISIBLE;
+    toggle.textContent = `최근 ${LOG_VISIBLE}줄만 보기`;
+  } else {
+    toggle.hidden = hidden <= 0;
+    toggle.textContent = `이전 기록 ${hidden}줄 더 보기`;
+  }
+
   list.scrollTop = list.scrollHeight;
   const parent = list.parentElement;
   parent.scrollTop = parent.scrollHeight;
@@ -731,6 +773,40 @@ function popupSafe(ev) {
   node.append(head);
   node.append(el('div', 'fx-empty', `이제 합병으로 사라지지 않습니다. 주가 ${won(ev.price)}`));
   FX.popup({ node, tone: 'safe', ms: 5000, sound: FX.alert2 });
+}
+
+// 체인 상장(창립) — 새 호텔 체인이 보드에 올라왔다
+function popupFound(ev) {
+  const node = el('div', 'fx-card');
+  node.append(el('div', 'fx-kicker', '신규 상장'));
+  const head = el('div', 'fx-title');
+  head.append(chainChip(ev.chain), el('span', null, '상장!'));
+  node.append(head);
+  node.append(el('div', 'fx-empty',
+    `${ev.by} 님이 창립했습니다 · ${ev.size}칸 · 주가 ${won(ev.price)}`
+    + (ev.bonus ? ' · 창립 보너스 주식 1장' : '')));
+  FX.popup({ node, tone: 'found', ms: 4500, sound: FX.alert2 });
+}
+
+// 주식 구매 — 매 턴 일어나므로 조작을 가리지 않는 알림 카드로 띄운다
+function notifyBuy(ev) {
+  const node = el('div', 'note-body');
+  node.append(el('div', 'note-head', `${ev.by} 님이 주식 구매`));
+  const row = el('div', 'note-chips');
+  if (ev.picks) {
+    for (const { chain, count } of ev.picks) {
+      const info = E.chainInfo(chain);
+      const chip = el('span', 'share-pill' + (info.ink ? ' ink' : ''), `${info.ko} ${count}`);
+      chip.style.background = info.color;
+      row.append(chip);
+    }
+  } else {
+    // 비공개 모드 — 종목은 알리지 않는다
+    row.append(el('span', 'note-hidden', `🔒 ${ev.count}장 (비공개)`));
+  }
+  row.append(el('span', 'note-cost', `−${won(ev.cost)}`));
+  node.append(row);
+  FX.notify({ node, tone: 'buy', sound: FX.cash });
 }
 
 // 게임 종료 조건 충족 — 끝낼지 물어본다
@@ -818,6 +894,8 @@ function drainEvents(v) {
     ui.seenEvent = ev.n;
     if (ev.type === 'payout') popupPayout(ev);
     else if (ev.type === 'safe') popupSafe(ev);
+    else if (ev.type === 'found') popupFound(ev);
+    else if (ev.type === 'buy') notifyBuy(ev);
   }
 
   // 내 차례가 되면 차임벨
@@ -852,21 +930,23 @@ function render() {
   }
 
   show('game');
+  ui.curMe = v.me;
   $('topCode').textContent = v.code;
   renderConnection(v);
 
   const acting = E.actingPlayer(v.state);
   const banner = $('turnBanner');
+  const myTurnNow = !v.state.ended && acting === v.me;
   if (v.state.ended) {
     banner.textContent = `게임 종료 — 승자 ${v.state.results[0].name}`;
-    banner.classList.remove('mine');
-  } else if (acting === v.me) {
+  } else if (myTurnNow) {
     banner.textContent = `▶ 내 차례 — ${phaseTitle(v.state)}`;
-    banner.classList.add('mine');
   } else {
     banner.textContent = `${v.state.players[acting].name} 님의 차례`;
-    banner.classList.remove('mine');
   }
+  banner.classList.toggle('mine', myTurnNow);
+  // 화면 전체에 테두리를 둘러 내 차례를 놓치지 않게 한다
+  $('game').classList.toggle('my-turn', myTurnNow);
 
   renderBoard(v);
   renderHand(v);
@@ -934,6 +1014,8 @@ $('chatForm').addEventListener('submit', e => {
   room?.localChat(input.value);
   input.value = '';
 });
+
+$('logToggle').onclick = () => { ui.logAll = !ui.logAll; render(); };
 
 $('btnLeave').onclick = () => {
   if (!confirm('방에서 나갑니다. 게임이 진행 중이면 다른 사람이 대신 진행할 수 있습니다. 나갈까요?')) return;

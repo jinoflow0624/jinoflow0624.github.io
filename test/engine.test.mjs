@@ -552,5 +552,58 @@ test('sanitize는 스냅샷을 내보내지 않는다 (남의 손패가 들어 �
   assert.equal(E.sanitize(s, 1).canUndo, false);
 });
 
+
+console.log('\n상장 / 구매 알림');
+test('체인을 창립하면 상장 이벤트가 발생한다', () => {
+  const s = blank(); s.board[T('5E')] = 'orphan'; give(s, 0, T('6E'));
+  must(E.applyAction(s, 0, { type: 'place', tile: T('6E') }));
+  must(E.applyAction(s, 0, { type: 'found', chain: 'luxor' }));
+  const ev = s.events.filter(e => e.type === 'found').pop();
+  assert.equal(ev.chain, 'luxor');
+  assert.equal(ev.by, s.players[0].name);
+  assert.equal(ev.size, 2);
+  assert.equal(ev.price, 200);
+  assert.equal(ev.bonus, true);            // 창립 보너스 1장 받음
+});
+test('주식을 사면 종목과 수량이 이벤트에 담긴다', () => {
+  const s = blank();
+  ['5E', '5F'].forEach(n => s.board[T(n)] = 'tower');
+  ['8E', '8F'].forEach(n => s.board[T(n)] = 'american');
+  s.phase = 'buy';
+  must(E.applyAction(s, 0, { type: 'buy', picks: { tower: 2, american: 1 } }));
+  const ev = s.events.filter(e => e.type === 'buy').pop();
+  assert.equal(ev.by, s.players[0].name);
+  assert.equal(ev.count, 3);
+  assert.equal(ev.cost, 200 * 2 + 300);
+  assert.deepEqual(ev.picks, [{ chain: 'tower', count: 2 }, { chain: 'american', count: 1 }]);
+});
+test('아무것도 사지 않으면 구매 이벤트가 없다', () => {
+  const s = blank();
+  ['5E', '5F'].forEach(n => s.board[T(n)] = 'tower');
+  s.phase = 'buy';
+  const before = s.events.filter(e => e.type === 'buy').length;
+  must(E.applyAction(s, 0, { type: 'buy', picks: {} }));
+  assert.equal(s.events.filter(e => e.type === 'buy').length, before);
+});
+test('비공개 모드에서는 구매 이벤트에 종목이 실리지 않는다', () => {
+  const s = blank();
+  s.privateShares = true;
+  ['5E', '5F'].forEach(n => s.board[T(n)] = 'tower');
+  s.phase = 'buy';
+  must(E.applyAction(s, 0, { type: 'buy', picks: { tower: 2 } }));
+  const ev = s.events.filter(e => e.type === 'buy').pop();
+  assert.equal(ev.picks, null);            // 종목은 가린다
+  assert.equal(ev.count, 2);               // 장수만 알린다
+  assert.equal(ev.cost, 400);
+});
+test('되돌리면 상장·구매 이벤트도 함께 취소된다', () => {
+  const s = blank(); s.board[T('5E')] = 'orphan'; give(s, 0, T('6E'));
+  must(E.applyAction(s, 0, { type: 'place', tile: T('6E') }));
+  must(E.applyAction(s, 0, { type: 'found', chain: 'luxor' }));
+  assert.equal(s.events.filter(e => e.type === 'found').length, 1);
+  must(E.applyAction(s, 0, { type: 'undo' }));
+  assert.equal(s.events.filter(e => e.type === 'found').length, 0);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);
