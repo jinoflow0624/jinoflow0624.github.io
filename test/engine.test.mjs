@@ -294,24 +294,26 @@ test('조건 미달 상태의 종료 선언은 거부', () => {
 });
 
 console.log('\n게임 생성 / 턴 진행');
-test('초기 배분: 6장 손패, $6000, 1A에 가까운 순 선공', () => {
+test('초기 배분: 인원수 설정대로, 1A에 가까운 순 선공', () => {
   const s = E.createGame(['가', '나', '다', '라'], 42);
+  const cfg = E.setup(4);
   assert.equal(s.players.length, 4);
   s.players.forEach(p => {
-    assert.equal(p.hand.length, E.HAND_SIZE);
-    assert.equal(p.money, E.START_MONEY);
+    assert.equal(p.hand.length, cfg.hand);
+    assert.equal(p.money, cfg.money);
   });
+  assert.equal(s.pool.tower, cfg.shares);
   const starts = s.players.map(p => p.startTile);
   assert.deepEqual(starts, [...starts].sort((a, b) => a - b));
   assert.equal(s.board.filter(v => v === 'orphan').length, 4);
-  assert.equal(s.bag.length, E.TILE_COUNT - 4 - 4 * E.HAND_SIZE);
+  assert.equal(s.bag.length, E.TILE_COUNT - 4 - 4 * cfg.hand);
 });
 test('sanitize는 남의 손패를 숨긴다', () => {
   const s = E.createGame(['가', '나'], 7);
   const v = E.sanitize(s, 0);
   assert.ok(Array.isArray(v.players[0].hand));
   assert.equal(v.players[1].hand, null);
-  assert.equal(v.players[1].handCount, E.HAND_SIZE);
+  assert.equal(v.players[1].handCount, E.setup(2).hand);
   assert.equal(v.bag, null);
   assert.equal(v.bagCount, s.bag.length);
 });
@@ -585,16 +587,18 @@ test('아무것도 사지 않으면 구매 이벤트가 없다', () => {
   must(E.applyAction(s, 0, { type: 'buy', picks: {} }));
   assert.equal(s.events.filter(e => e.type === 'buy').length, before);
 });
-test('비공개 모드에서는 구매 이벤트에 종목이 실리지 않는다', () => {
+test('비공개 모드라도 사는 순간은 공개한다 (기록에는 남기지 않음)', () => {
   const s = blank();
   s.privateShares = true;
   ['5E', '5F'].forEach(n => s.board[T(n)] = 'tower');
   s.phase = 'buy';
   must(E.applyAction(s, 0, { type: 'buy', picks: { tower: 2 } }));
   const ev = s.events.filter(e => e.type === 'buy').pop();
-  assert.equal(ev.picks, null);            // 종목은 가린다
-  assert.equal(ev.count, 2);               // 장수만 알린다
-  assert.equal(ev.cost, 400);
+  assert.deepEqual(ev.picks, [{ chain: 'tower', count: 2 }]);   // 팝업으로는 보인다
+  // 기록은 가린다 — 60줄이 남아 있어 합산 추적이 쉬워지기 때문
+  const line = s.log[s.log.length - 1].msg;
+  assert.ok(line.includes('주식 2장 구매'), line);
+  assert.ok(!line.includes('타워'), line);
 });
 test('되돌리면 상장·구매 이벤트도 함께 취소된다', () => {
   const s = blank(); s.board[T('5E')] = 'orphan'; give(s, 0, T('6E'));
@@ -603,6 +607,102 @@ test('되돌리면 상장·구매 이벤트도 함께 취소된다', () => {
   assert.equal(s.events.filter(e => e.type === 'found').length, 1);
   must(E.applyAction(s, 0, { type: 'undo' }));
   assert.equal(s.events.filter(e => e.type === 'found').length, 0);
+});
+
+
+console.log('\n처분 순서 (보유량 내림차순)');
+function mergerWith(shares) {   // shares: 플레이어별 룩소르 보유량
+  const s = blank(['A', 'B', 'C', 'D']);
+  ['5E', '5F', '5D'].forEach(n => s.board[T(n)] = 'tower');
+  ['8E', '9E'].forEach(n => s.board[T(n)] = 'luxor');
+  s.board[T('6E')] = 'tower';
+  shares.forEach((n, i) => { s.players[i].shares.luxor = n; });
+  give(s, 0, T('7E'));   // 0번이 합병을 일으킨다
+  return s;
+}
+test('많이 가진 사람이 먼저 처분한다', () => {
+  const s = mergerWith([1, 5, 3, 0]);
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  assert.deepEqual(s.merger.queue, [1, 2, 0]);   // 5장 → 3장 → 1장, 0장은 제외
+  assert.equal(E.actingPlayer(s), 1);            // 최대주주가 먼저
+});
+test('합병을 일으켜도 적게 가졌으면 나중에 처분한다', () => {
+  const s = mergerWith([1, 4, 0, 0]);
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  assert.deepEqual(s.merger.queue, [1, 0]);      // 공식 룰이면 [0, 1] 이었을 순서
+  assert.equal(E.applyAction(s, 0, { type: 'dispose', sell: 1 }).ok, false);  // 아직 차례 아님
+  must(E.applyAction(s, 1, { type: 'dispose', sell: 4 }));
+  must(E.applyAction(s, 0, { type: 'dispose', sell: 1 }));
+});
+test('동률이면 합병 유발자부터 시계방향으로 가른다', () => {
+  const s = mergerWith([2, 2, 2, 0]);
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  assert.deepEqual(s.merger.queue, [0, 1, 2]);
+  // 유발자가 2번이면 2 → 3 → 0 → 1 순으로 가른다
+  const s2 = mergerWith([2, 0, 2, 2]);
+  s2.turn = 2; s2.players[2].hand = []; give(s2, 2, T('7E'));
+  s2.players[0].hand = s2.players[0].hand.filter(t => t !== T('7E'));
+  must(E.applyAction(s2, 2, { type: 'place', tile: T('7E') }));
+  assert.deepEqual(s2.merger.queue, [2, 3, 0]);
+});
+test('처분 시작 시 모두의 보유량이 이벤트로 공개된다', () => {
+  const s = mergerWith([1, 5, 3, 0]);
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  const ev = s.events.filter(e => e.type === 'disposeStart').pop();
+  assert.equal(ev.chain, 'luxor');
+  assert.equal(ev.survivor, 'tower');
+  assert.deepEqual(ev.order.map(o => o.count), [5, 3, 1]);   // 많은 순
+  assert.deepEqual(s.merger.holdings.map(h => h.count), [5, 3, 1]);
+});
+test('비공개 모드라도 합병 중인 체인의 보유량은 공개된다', () => {
+  const s = mergerWith([1, 5, 0, 0]);
+  s.privateShares = true;
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  const ev = s.events.filter(e => e.type === 'disposeStart').pop();
+  assert.deepEqual(ev.order.map(o => o.count), [5, 1]);
+});
+test('처분하면 무엇을 했는지와 남은 인원이 이벤트에 담긴다', () => {
+  const s = mergerWith([0, 6, 2, 0]);
+  must(E.applyAction(s, 0, { type: 'place', tile: T('7E') }));
+  must(E.applyAction(s, 1, { type: 'dispose', sell: 2, trade: 2 }));
+  const ev = s.events.filter(e => e.type === 'disposed').pop();
+  assert.equal(ev.name, s.players[1].name);
+  assert.equal(ev.held, 6);
+  assert.equal(ev.sell, 2);
+  assert.equal(ev.trade, 2);
+  assert.equal(ev.hold, 2);          // 6 - 2 - 2
+  assert.equal(ev.got, 1);           // 2장 → 1장
+  assert.equal(ev.gained, 400);      // 2장 × $200
+  assert.equal(ev.remaining, 1);     // 아직 2번이 남았다
+});
+
+console.log('\n더 둘 수 없을 때');
+test('가방이 비고 아무도 놓을 수 없으면 게임이 자동으로 끝난다', () => {
+  const s = blank(['A', 'B', 'C']);
+  // 안전 체인 둘을 한 줄 띄워 나란히 놓는다 (사이의 칸은 영구히 못 놓는 자리)
+  for (let c = 1; c <= 11; c++) { s.board[T(`${c}A`)] = 'tower'; s.board[T(`${c}C`)] = 'luxor'; }
+  s.bag = [];
+  give(s, 0, T('1B'));            // 두 안전 체인을 잇는 타일 = dead
+  s.players[1].hand = [];
+  s.players[2].hand = [];
+  assert.equal(E.tileStatus(s, T('1B')), 'dead');
+  must(E.applyAction(s, 0, { type: 'pass' }));
+  assert.equal(s.ended, true);
+  assert.equal(s.phase, 'over');
+  assert.ok(s.results.length === 3);
+  assert.ok(s.log.some(l => l.msg.includes('아무도 타일을 놓을 수 없어')), '종료 사유가 기록에 남는다');
+});
+test('가방에 타일이 남아 있으면 죽은 타일을 바꿔 주고 계속한다', () => {
+  const s = blank(['A', 'B', 'C']);
+  for (let c = 1; c <= 11; c++) { s.board[T(`${c}A`)] = 'tower'; s.board[T(`${c}C`)] = 'luxor'; }
+  s.bag = [T('5G')];
+  give(s, 0, T('1B'));
+  s.players[1].hand = [];
+  s.players[2].hand = [];
+  // 넘기려 해도 죽은 타일이 5G로 교체되므로 놓을 수 있는 타일이 생긴다
+  assert.equal(E.applyAction(s, 0, { type: 'pass' }).ok, false);
+  assert.deepEqual(s.players[0].hand, [T('5G')]);
+  assert.equal(s.ended, false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

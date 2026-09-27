@@ -539,42 +539,6 @@ h1, h2, h3 { margin: 0 0 .5em; line-height: 1.25; font-family: var(--font-displa
   box-shadow: 2px 2px 0 rgba(36, 31, 26, .25);
 }
 
-/* ── 알림 카드 (조작을 가리지 않음) ───────────────────────────────────── */
-/* 사이드 패널의 탭을 가리지 않도록 아래쪽에 쌓는다 */
-.fx-notes {
-  position: fixed; z-index: 40; pointer-events: none;
-  bottom: calc(14px + env(safe-area-inset-bottom)); right: 14px;
-  display: flex; flex-direction: column-reverse; gap: 8px; align-items: flex-end;
-}
-@media (max-width: 620px) {
-  .fx-notes { left: 12px; right: 12px; align-items: stretch; }
-}
-.fx-note {
-  pointer-events: auto; cursor: pointer;
-  background: var(--surface); color: var(--text);
-  border: 2px solid var(--text); border-left: 6px solid var(--gold);
-  border-radius: 4px; padding: 9px 12px; max-width: 300px;
-  box-shadow: 4px 4px 0 rgba(36, 31, 26, .18);
-  animation: noteIn .22s ease-out;
-}
-.fx-note.out { animation: noteOut .25s ease-in forwards; }
-@keyframes noteIn  { from { opacity: 0; transform: translateY(12px); } }
-@keyframes noteOut { to   { opacity: 0; transform: translateY(8px); } }
-@media (prefers-reduced-motion: reduce) {
-  .fx-note, .fx-note.out { animation: none; }
-  .fx-note.out { opacity: 0; }
-}
-.note-head {
-  font-size: 12px; font-weight: 800; font-family: var(--font-display);
-  letter-spacing: .02em; margin-bottom: 6px;
-}
-.note-chips { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
-.note-cost {
-  margin-left: auto; font-size: 12px; font-weight: 800;
-  font-variant-numeric: tabular-nums; color: var(--danger);
-}
-.note-hidden { font-size: 12px; font-weight: 700; color: var(--text-dim); }
-
 /* ── 상장 팝업 ────────────────────────────────────────────────────────── */
 .fx-dialog.found .fx-card { border-top-color: var(--accent); }
 
@@ -597,3 +561,34 @@ h1, h2, h3 { margin: 0 0 .5em; line-height: 1.25; font-family: var(--font-displa
 /* 고른 타일이 우선 — 새 타일 표시는 뒤로 물러난다 */
 .tile.fresh.sel { border-color: var(--text); box-shadow: 3px 5px 0 rgba(36, 31, 26, .18); }
 .tile.fresh.sel::after { background: var(--text); color: var(--surface); }
+
+/* ── 처분 순서 표시 ───────────────────────────────────────────────────── */
+.dispose-order { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+.order-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 1.5px solid var(--line); border-radius: 3px; padding: 3px 9px;
+  font-size: 12px; font-weight: 700; background: var(--surface);
+}
+.order-chip b {
+  display: grid; place-items: center; width: 16px; height: 16px; border-radius: 2px;
+  background: var(--text-dim); color: var(--surface); font-size: 10px;
+}
+.order-chip.now { border-color: var(--gold); border-width: 2px; background: color-mix(in srgb, var(--gold) 14%, transparent); }
+.order-chip.now b { background: var(--gold); color: #241F1A; }
+.order-chip.done { opacity: .45; text-decoration: line-through; }
+
+.fx-dialog.dispose .fx-card { border-top-color: var(--danger); }
+
+/* ── 매수 팝업 ────────────────────────────────────────────────────────── */
+.fx-buy-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.buy-chip {
+  font-size: 13px; font-weight: 800; color: #fff; border-radius: 3px;
+  padding: 5px 11px; font-family: var(--font-display);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .25);
+}
+.buy-chip.ink { color: #241F1A; }
+.fx-total {
+  margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line);
+  font-size: 12.5px; color: var(--text-dim); font-variant-numeric: tabular-nums;
+}
+.fx-dialog.buy .fx-card { border-top-color: var(--good); }

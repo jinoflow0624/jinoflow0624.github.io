@@ -507,6 +507,19 @@ function renderDispose(pane, row, v) {
   info.textContent = `보유 ${held}장 · ${E.chainInfo(defunct).ko} 주가 ${won(price)} · ${E.chainInfo(survivor).ko} 재고 ${poolSurv}장`;
   pane.append(info);
 
+  // 처분 순서와 각자 보유량을 계속 볼 수 있게 한다
+  if (m.holdings?.length) {
+    const order = el('div', 'dispose-order');
+    m.holdings.forEach((h, i) => {
+      const done = i < m.queueIdx;
+      const nowTurn = i === m.queueIdx;
+      const chip = el('span', 'order-chip' + (done ? ' done' : '') + (nowTurn ? ' now' : ''));
+      chip.append(el('b', null, `${i + 1}`), el('span', null, `${h.name} ${h.count}장`));
+      order.append(chip);
+    });
+    pane.append(order);
+  }
+
   const grid = el('div', 'buy-grid');
 
   const sellItem = el('div', 'buy-item');
@@ -788,25 +801,71 @@ function popupFound(ev) {
   FX.popup({ node, tone: 'found', ms: 4500, sound: FX.alert2 });
 }
 
-// 주식 구매 — 매 턴 일어나므로 조작을 가리지 않는 알림 카드로 띄운다
-function notifyBuy(ev) {
-  const node = el('div', 'note-body');
-  node.append(el('div', 'note-head', `${ev.by} 님이 주식 구매`));
-  const row = el('div', 'note-chips');
-  if (ev.picks) {
-    for (const { chain, count } of ev.picks) {
-      const info = E.chainInfo(chain);
-      const chip = el('span', 'share-pill' + (info.ink ? ' ink' : ''), `${info.ko} ${count}`);
-      chip.style.background = info.color;
-      row.append(chip);
-    }
-  } else {
-    // 비공개 모드 — 종목은 알리지 않는다
-    row.append(el('span', 'note-hidden', `🔒 ${ev.count}장 (비공개)`));
+// 주식 구매 — 모두가 보도록 화면 중앙에 띄운다.
+// 매 턴 일어나므로 짧게 두고, 아무 데나 누르면 바로 닫힌다.
+function popupBuy(ev) {
+  const node = el('div', 'fx-card');
+  node.append(el('div', 'fx-kicker', '주식 매수'));
+  node.append(el('div', 'fx-title', `${ev.by} 님이 ${ev.count}장 매수`));
+
+  // 사는 순간은 비공개 모드에서도 종목을 밝힌다
+  const row = el('div', 'fx-buy-row');
+  for (const { chain, count } of ev.picks || []) {
+    const info = E.chainInfo(chain);
+    const chip = el('span', 'buy-chip' + (info.ink ? ' ink' : ''), `${info.ko} ${count}장`);
+    chip.style.background = info.color;
+    row.append(chip);
   }
-  row.append(el('span', 'note-cost', `−${won(ev.cost)}`));
   node.append(row);
-  FX.notify({ node, tone: 'buy', sound: FX.cash });
+  node.append(el('div', 'fx-total', `지출 ${won(ev.cost)}`));
+  FX.popup({ node, tone: 'buy', ms: 2800, sound: FX.cash });
+}
+
+// 합병 처분 시작 — 누가 몇 장 가졌고 어떤 순서로 처분하는지 모두에게 공개
+function popupDisposeStart(ev) {
+  const node = el('div', 'fx-card');
+  node.append(el('div', 'fx-kicker', '주식 처분'));
+  const head = el('div', 'fx-title');
+  head.append(chainChip(ev.chain), el('span', null, '→'), chainChip(ev.survivor));
+  node.append(head);
+  node.append(el('div', 'fx-empty', `보유량이 많은 사람부터 처분합니다 · ${E.chainInfo(ev.chain).ko} 주가 ${won(ev.price)}`));
+
+  const list = el('div', 'fx-list');
+  ev.order.forEach((o, i) => {
+    const row = el('div', 'fx-row' + (i === 0 ? ' top' : ''));
+    row.append(
+      el('span', 'fx-role', `${i + 1}번째`),
+      el('span', 'fx-name', o.name),
+      el('span', 'fx-amt', `${o.count}장`),
+    );
+    list.append(row);
+  });
+  node.append(list);
+  FX.popup({ node, tone: 'dispose', ms: 6500, sound: FX.alert2 });
+}
+
+// 처분 결과 — 무엇을 했고 몇 장이 남았는지 모두에게 보여준다
+function popupDisposed(ev) {
+  const node = el('div', 'fx-card');
+  node.append(el('div', 'fx-kicker', '주식 처분'));
+  node.append(el('div', 'fx-title', `${ev.name} 님 · ${E.chainInfo(ev.chain).ko} ${ev.held}장`));
+
+  const list = el('div', 'fx-list');
+  const line = (label, value, cls) => {
+    const row = el('div', 'fx-row' + (cls ? ' ' + cls : ''));
+    row.append(el('span', 'fx-name', label), el('span', 'fx-amt', value));
+    list.append(row);
+  };
+  if (ev.sell) line('매각', `${ev.sell}장 → +${won(ev.gained)}`, 'top');
+  if (ev.trade) line(`${E.chainInfo(ev.survivor).ko}(으)로 교환`, `${ev.trade}장 → ${ev.got}장`);
+  if (ev.hold) line('보유 유지', `${ev.hold}장`);
+  if (!ev.sell && !ev.trade) line('전부 보유', `${ev.held}장`);
+  node.append(list);
+
+  node.append(el('div', 'fx-total', ev.remaining > 0
+    ? `아직 ${ev.remaining}명이 처분할 차례 · ${E.chainInfo(ev.survivor).ko} 재고 ${ev.left}장`
+    : `처분 완료 · ${E.chainInfo(ev.survivor).ko} 재고 ${ev.left}장`));
+  FX.popup({ node, tone: 'dispose', ms: 4200, sound: FX.cash });
 }
 
 // 게임 종료 조건 충족 — 끝낼지 물어본다
@@ -895,7 +954,9 @@ function drainEvents(v) {
     if (ev.type === 'payout') popupPayout(ev);
     else if (ev.type === 'safe') popupSafe(ev);
     else if (ev.type === 'found') popupFound(ev);
-    else if (ev.type === 'buy') notifyBuy(ev);
+    else if (ev.type === 'buy') popupBuy(ev);
+    else if (ev.type === 'disposeStart') popupDisposeStart(ev);
+    else if (ev.type === 'disposed') popupDisposed(ev);
   }
 
   // 내 차례가 되면 차임벨

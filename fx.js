@@ -143,28 +143,3 @@ export function popup({ node, ms, buttons, tone, sound, onClose }) {
 }
 
 export const popupPending = () => showing || queue.length > 0;
-
-// ── 알림 카드 ────────────────────────────────────────────────────────────────
-// 팝업과 달리 조작을 가리지 않는다. 매 턴 일어나는 일(주식 구매 등)에 쓴다.
-const NOTE_MAX = 3;
-
-export function notify({ node, ms = 4200, tone, sound }) {
-  const wrap = document.getElementById('fxNotes');
-  if (!wrap) return;
-
-  const card = document.createElement('div');
-  card.className = 'fx-note' + (tone ? ' ' + tone : '');
-  card.append(node);
-  wrap.append(card);
-
-  // 너무 쌓이면 오래된 것부터 치운다
-  while (wrap.children.length > NOTE_MAX) wrap.firstElementChild.remove();
-
-  const close = () => {
-    card.classList.add('out');
-    setTimeout(() => card.remove(), 260);
-  };
-  card.onclick = close;
-  setTimeout(close, ms);
-  sound?.();
-}

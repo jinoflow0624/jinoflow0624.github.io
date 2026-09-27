@@ -9,6 +9,24 @@ export const END_SIZE = 41;            // 41칸 이상 = 종료 선언 가능
 export const SHARES_PER_CHAIN = 25;
 export const START_MONEY = 6000;
 export const HAND_SIZE = 6;
+
+// 인원별 초기 설정. 공식 룰북에는 인원별 변형이 없다(항상 25주 / $6,000 / 손패 6장).
+// 그런데 적은 인원으로 하면 보드가 늦게 차서 1인당 턴 수가 크게 늘고(2인 33턴 vs 6인 10턴),
+// 돈이 없어서 살 수 있는데도 못 사는 턴이 2인에서 46%까지 치솟는다 — 배당은 그대로인데
+// 사야 할 기회가 3배라서 자금만 계속 마른다. 시작 자금만 인원 수에 맞춰 늘려 이 비율을
+// 22~26%로 평평하게 맞췄다(엔진 + 단순 AI로 인원별 160판 시뮬레이션해서 고른 값).
+// 주식 수를 줄이는 방향은 오히려 못 사는 비율을 더 키워서 버렸다.
+export const SETUP_BY_PLAYERS = {
+  2: { shares: 25, money: 14000, hand: 6 },
+  3: { shares: 25, money: 10500, hand: 6 },
+  4: { shares: 25, money:  8000, hand: 6 },
+  5: { shares: 25, money:  7000, hand: 6 },
+  6: { shares: 25, money:  6000, hand: 6 },
+};
+
+export function setup(players) {
+  return SETUP_BY_PLAYERS[players] || SETUP_BY_PLAYERS[6];
+}
 export const MAX_BUY = 3;
 
 // 1962년 인쇄물 톤. 색은 선명하게 두되(게임의 핵심 신호라서),
@@ -194,19 +212,23 @@ export function createGame(entries, seed = Date.now(), opts = {}) {
   const board = new Array(TILE_COUNT).fill(null);
   for (const s of seats) board[s.start] = 'orphan';
 
+  // 인원수에 맞춘 설정 (opts 로 덮어쓸 수 있다 — 시뮬레이션과 테스트용)
+  const cfg = { ...setup(seats.length), ...(opts.setup || {}) };
+
   const state = {
+    cfg,
     board,
     bag,
     seed,
     players: seats.map(s => ({
       name: s.name,
       ref: s.ref,
-      money: START_MONEY,
+      money: cfg.money,
       shares: Object.fromEntries(CHAIN_IDS.map(id => [id, 0])),
       hand: [],
       startTile: s.start,
     })),
-    pool: Object.fromEntries(CHAIN_IDS.map(id => [id, SHARES_PER_CHAIN])),
+    pool: Object.fromEntries(CHAIN_IDS.map(id => [id, cfg.shares])),
     turn: 0,
     phase: 'place',
     pendingFound: null,
@@ -255,7 +277,8 @@ function checkSafe(state) {
 }
 
 function refill(state, player) {
-  while (player.hand.length < HAND_SIZE && state.bag.length > 0) player.hand.push(state.bag.pop());
+  const size = state.cfg?.hand ?? HAND_SIZE;
+  while (player.hand.length < size && state.bag.length > 0) player.hand.push(state.bag.pop());
   player.hand.sort((a, b) => a - b);
 }
 
@@ -518,15 +541,30 @@ function beginDefunct(state, id) {
   if (payouts.length === 0) log(state, `   ${chainInfo(id).ko} 주주 없음 — 배당 없음`);
   emit(state, { type: 'payout', chain: id, size: m.sizes[id], price, entries: shown });
 
-  // 주식 처분 순서: 합병을 일으킨 플레이어부터 시계방향, 해당 주식 보유자만
+  // 주식 처분 순서: 많이 가진 사람부터.
+  // 공식 룰은 '타일 놓은 사람부터 시계방향'이지만, 하우스룰로 보유량 내림차순을 쓴다.
+  // 같은 수량이면 공식 순서(합병 유발자부터 시계방향)로 가른다.
   const n = state.players.length;
-  m.queue = [];
-  for (let k = 0; k < n; k++) {
-    const idx = (m.maker + k) % n;
-    if (state.players[idx].shares[id] > 0) m.queue.push(idx);
-  }
+  const seat = i => (i - m.maker + n) % n;   // 합병 유발자를 0으로 둔 자리 순서
+  m.queue = state.players
+    .map((p, i) => ({ i, count: p.shares[id] }))
+    .filter(x => x.count > 0)
+    .sort((a, b) => b.count - a.count || seat(a.i) - seat(b.i))
+    .map(x => x.i);
+
+  // 처분 순서를 정하는 근거이므로 모두에게 보유량을 공개한다.
+  // 소멸하는 체인 한 종목에 한정되며, 비공개 모드에서도 이 체인만은 드러난다.
+  m.holdings = state.players
+    .map((p, i) => ({ name: p.name, count: p.shares[id] }))
+    .filter(x => x.count > 0)
+    .sort((a, b) => b.count - a.count);
+
   m.queueIdx = 0;
   if (m.queue.length === 0) return completeDefunct(state);
+  emit(state, {
+    type: 'disposeStart', chain: id, survivor: m.survivor, price,
+    order: m.queue.map(i => ({ name: state.players[i].name, count: state.players[i].shares[id] })),
+  });
   state.phase = 'dispose';
   return ok();
 }
@@ -559,15 +597,19 @@ function actDispose(state, playerIdx, action) {
     player.shares[survivor] += trade / 2;
   }
   const hold = held - sell - trade;
-  if (state.privateShares) {
-    log(state, `   ${player.name}: ${chainInfo(defunct).ko} 주식 처분 완료`);
-  } else {
-    const parts = [];
-    if (sell) parts.push(`매각 ${sell}장(+$${(sell * price).toLocaleString()})`);
-    if (trade) parts.push(`교환 ${trade}→${trade / 2}장`);
-    if (hold) parts.push(`보유 ${hold}장`);
-    log(state, `   ${player.name}: ${chainInfo(defunct).ko} ${parts.join(', ') || '변동 없음'}`);
-  }
+  // 합병 중인 체인의 처분 내역은 순서와 재고에 직접 영향을 주므로 공개한다
+  const parts = [];
+  if (sell) parts.push(`매각 ${sell}장(+$${(sell * price).toLocaleString()})`);
+  if (trade) parts.push(`교환 ${trade}→${trade / 2}장`);
+  if (hold) parts.push(`보유 ${hold}장`);
+  log(state, `   ${player.name}: ${chainInfo(defunct).ko} ${parts.join(', ') || '변동 없음'}`);
+  emit(state, {
+    type: 'disposed', chain: defunct, survivor,
+    name: player.name, held, sell, trade, hold,
+    gained: sell * price, got: trade / 2,
+    left: state.pool[survivor],
+    remaining: m.queue.length - m.queueIdx - 1,   // 아직 처분하지 않은 사람 수
+  });
 
   // 다른 사람이 결정을 내린 뒤에는 되돌릴 수 없다
   if (state.undo && state.undo.by !== playerIdx) state.undo = null;
@@ -640,11 +682,9 @@ function actBuy(state, playerIdx, action) {
     log(state, state.privateShares
       ? `${player.name}: 주식 ${count}장 구매 (-$${cost.toLocaleString()})`
       : `${player.name}: ${bought.join(', ')} 구매 (-$${cost.toLocaleString()})`);
-    // 알림도 같은 원칙 — 비공개 모드에서는 종목을 싣지 않는다
-    emit(state, {
-      type: 'buy', by: player.name, count, cost,
-      picks: state.privateShares ? null : picked,
-    });
+    // 사는 행위 자체는 공개다 — 비공개 모드에서도 이번에 무엇을 샀는지는 알린다.
+    // 감추는 것은 '쌓인 보유 현황'이므로, 기록(로그)에는 남기지 않아 합산 추적을 막는다.
+    emit(state, { type: 'buy', by: player.name, count, cost, picks: picked });
   }
 
   if (action.declareEnd) {
@@ -674,12 +714,19 @@ function endTurn(state) {
   replaceDeadTiles(state, next);
   refill(state, next);
   state.phase = 'place';
+  // 가방이 비고 아무도 놓을 수 없으면 더 진행할 수 없다.
+  // 이 상태에서는 구매 단계에 닿지 못해 '종료 선언' 버튼도 뜨지 않으므로 엔진이 끝낸다.
+  if (state.bag.length === 0 && state.players.every(p => playableTiles(state, p.hand).length === 0)) {
+    return endGame(state, null);
+  }
   return ok();
 }
 
 function endGame(state, declarerIdx) {
   state.undo = null;
-  log(state, `🏁 ${state.players[declarerIdx].name}이(가) 게임 종료를 선언했습니다.`);
+  log(state, declarerIdx == null
+    ? '🏁 가방이 비고 아무도 타일을 놓을 수 없어 게임을 종료합니다.'
+    : `🏁 ${state.players[declarerIdx].name}이(가) 게임 종료를 선언했습니다.`);
   const sizes = chainSizes(state);
   const active = CHAIN_IDS.filter(id => sizes[id] > 0);
 
