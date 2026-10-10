@@ -162,6 +162,11 @@ export function rememberRoom(code) {
   saveVisited(list);
 }
 
+// 이미 없앤 방은 청소 목록에서도 뺀다 (없는 방을 매번 조회하지 않게)
+export function forgetRoom(code) {
+  saveVisited(visitedRooms().filter(r => r.code !== code));
+}
+
 // 내가 다녀간 방 중 만료된 것을 지운다. 최근에 있었던 방은 만료일 수 없으므로 건너뛴다.
 export async function sweepMyRooms() {
   if (!db) return 0;
@@ -462,6 +467,34 @@ export class FireRoom {
       status: this.status,
       canStart: !this.doc?.started && seats.length >= 2,
     };
+  }
+
+  // 방을 통째로 없앤다. 다른 사람들은 구독이 끊기며 '방이 삭제되었습니다'로 빠져나간다.
+  async closeRoom() {
+    this.closed = true;                        // 내 구독이 먼저 반응하지 않게 먼저 닫는다
+    try { this.offRoom?.(); } catch { /* 무시 */ }
+    await fb.remove(this.ref);
+    forgetRoom(this.code);
+  }
+
+  // 내 자리만 비운다 (시작 전에만). 남은 자리의 번호를 다시 매겨야
+  // 다음 사람이 들어올 때 번호가 겹치지 않는다.
+  async leaveSeat() {
+    const { ok } = await txnOnRoom(this.ref, (room, fail) => {
+      if (room.started) return fail('이미 시작된 게임입니다.');
+      const seats = { ...(room.seats || {}) };
+      if (!seats[this.token]) return room;
+      delete seats[this.token];
+      Object.entries(seats)
+        .sort((a, b) => (a[1].idx ?? 0) - (b[1].idx ?? 0))
+        .forEach(([tok, s], i) => { seats[tok] = { ...s, idx: i }; });
+      room.seats = seats;
+      if (room.seen) { const seen = { ...room.seen }; delete seen[this.token]; room.seen = seen; }
+      room.lastActive = Date.now();
+      return room;
+    });
+    forgetRoom(this.code);
+    return ok;
   }
 
   destroy() {

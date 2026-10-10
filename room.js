@@ -120,6 +120,16 @@ export class HostRoom {
       if (text) { this.pushChat(seat.name, text); this.pushAll(); }
       return;
     }
+    if (msg.t === 'leave') {
+      // 스스로 나간 것이니 '잠깐 끊긴 것'으로 기다리지 않고 바로 자리를 비운다
+      if (this.state) return;
+      clearTimeout(this.timers.get(seat.token));
+      this.timers.delete(seat.token);
+      this.seats = this.seats.filter(s => s !== seat);
+      this.pushChat(null, `${seat.name} 님이 퇴장했습니다.`);
+      this.pushAll();
+      return;
+    }
     if (msg.t === 'action') return this.act(seatIdx, msg.action, conn);
     if (msg.t === 'start') {
       if (seatIdx !== 0) return this.net.send(conn, { t: 'error', msg: '방장만 게임을 시작할 수 있습니다.' });
@@ -254,6 +264,16 @@ export class HostRoom {
     };
   }
 
+  // 방을 없앤다. 참가자들에게 이유를 알려 주고, 이어하기 저장본도 버린다.
+  closeRoom() {
+    for (const seat of this.seats) {
+      if (seat.conn) this.net.send(seat.conn, { t: 'error', msg: '방장이 방을 없앴습니다.', fatal: true });
+    }
+    clearHostGame();
+    // 연결을 끊기 전에 메시지가 나갈 틈을 준다
+    return new Promise(r => setTimeout(r, 250));
+  }
+
   destroy() {
     clearInterval(this.beat);
     for (const t of this.timers.values()) clearTimeout(t);
@@ -381,6 +401,11 @@ export class GuestRoom {
   localAct(action) { this.net?.send({ t: 'action', action }); }
   localChat(text) { const t = String(text || '').slice(0, 200).trim(); if (t) this.net?.send({ t: 'chat', text: t }); }
   localStart() { /* 참가자는 시작할 수 없다 */ }
+  // 로비에서 스스로 나간다 — 방장이 바로 자리를 비우도록 알린다
+  leaveSeat() {
+    this.net?.send({ t: 'leave' });
+    return new Promise(r => setTimeout(r, 250));   // 메시지가 나갈 틈을 준다
+  }
 
   view() {
     return {

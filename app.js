@@ -35,10 +35,20 @@ const ui = {
 };
 
 // ── 화면 전환 ────────────────────────────────────────────────────────────────
+let curScreen = 'setup';
 function show(which) {
   $('setup').hidden = which !== 'setup';
   $('lobby').hidden = which !== 'lobby';
   $('game').hidden = which !== 'game';
+
+  // 방에 들어갈 때 히스토리 항목을 하나 쌓아, 모바일 뒤로가기가
+  // 사이트를 떠나는 대신 '나가기'로 이어지게 한다 (아래 popstate 참고)
+  if (which !== curScreen) {
+    if (curScreen === 'setup' && which !== 'setup') {
+      history.pushState({ acq: which }, '', room?.code ? inviteLink(room.code) : location.href);
+    }
+    curScreen = which;
+  }
 }
 
 let toastTimer = null;
@@ -107,6 +117,49 @@ function leaveRoom() {
   setupMsg('방에서 나왔습니다.', true);
 }
 
+// 방을 만든 사람인가 — P2P는 방장, 서버 모드는 첫 자리(방을 만든 사람)가 주인이다
+function iMadeThisRoom(v) {
+  return !!v && (v.isHost || (v.serverless && v.seat === 0));
+}
+
+// 대기실에서 뒤로 — 방을 만든 사람이면 방까지 없애고, 아니면 내 자리만 뺀다
+async function exitLobby() {
+  const v = room?.view();
+  if (!v) { show('setup'); return; }
+  const owner = iMadeThisRoom(v);
+  const others = Math.max(0, v.lobby.seats.length - 1);
+  const ask = owner
+    ? (others > 0
+      ? `방 ${v.code} 를 없앱니다. 대기실에 있는 다른 ${others}명도 함께 나가게 되고, 이 코드로는 다시 들어올 수 없습니다. 계속할까요?`
+      : `방 ${v.code} 를 없애고 처음 화면으로 돌아갑니다. 계속할까요?`)
+    : '대기실에서 나가 처음 화면으로 돌아갑니다. 계속할까요?';
+  if (!confirm(ask)) return;
+
+  const btn = $('btnLobbyBack');
+  btn.disabled = true;
+  try {
+    if (owner) await room?.closeRoom?.();
+    else await room?.leaveSeat?.();
+  } catch (err) {
+    toast(err?.message || '처리하지 못했습니다. 잠시 후 다시 시도해 주세요.');
+    return;
+  } finally {
+    btn.disabled = false;
+  }
+  leaveRoom();
+  setupMsg(owner ? '방을 없앴습니다.' : '대기실에서 나왔습니다.', true);
+}
+
+// 연결이 끊기거나 방이 사라진 경우 — 타이머까지 정리하고 시작 화면으로 돌린다
+function fatalExit(err, instance) {
+  forgetCurrent();
+  try { (room || instance)?.destroy(); } catch { /* 무시 */ }
+  room = null;
+  history.replaceState(null, '', location.pathname);
+  show('setup');
+  setupMsg(err?.message || '연결이 끊어졌습니다.');
+}
+
 let releaseWakeLock = null;
 function wireRoom(r) {
   room = r;
@@ -128,7 +181,7 @@ async function doHost(restore = null) {
         code: Net.makeRoomCode(), name, create: true,
         opts: { privateShares: $('optPrivate').checked },
         onChange: render,
-        onFatal: err => { setupMsg(err.message || '연결 오류'); show('setup'); },
+        onFatal: err => fatalExit(err, r),
       });
       wireRoom(r);  // 구독 콜백이 open() 도중에 올 수 있어 먼저 연결해 둔다
       try {
@@ -144,7 +197,7 @@ async function doHost(restore = null) {
       restore,
       opts: { privateShares: $('optPrivate').checked },
       onChange: render,
-      onFatal: err => { setupMsg(err.message || '연결 오류'); show('setup'); },
+      onFatal: err => fatalExit(err, r),
     });
     await r.open();
     wireRoom(r);
@@ -169,7 +222,7 @@ async function doJoin() {
       const r = new FireRoom({
         code, name, create: false,
         onChange: render,
-        onFatal: err => { setupMsg(err.message || '연결이 끊어졌습니다.'); show('setup'); },
+        onFatal: err => fatalExit(err, r),
       });
       wireRoom(r);
       try {
@@ -182,7 +235,7 @@ async function doJoin() {
     const r = new GuestRoom({
       code, name,
       onChange: render,
-      onFatal: err => { setupMsg(err.message || '연결이 끊어졌습니다.'); show('setup'); },
+      onFatal: err => fatalExit(err, r),
     });
     await r.open();
     wireRoom(r);
@@ -214,6 +267,14 @@ function renderLobby(v) {
   start.hidden = !(v.isHost || v.serverless);
   start.disabled = n < MIN_PLAYERS;
   start.textContent = n < MIN_PLAYERS ? `게임 시작 (${MIN_PLAYERS}명 이상 필요)` : `게임 시작 (${n}명)`;
+  const back = $('btnLobbyBack');
+  const owner = iMadeThisRoom(v);
+  back.textContent = owner ? '← 방 없애기' : '← 나가기';
+  back.classList.toggle('danger', owner);
+  back.title = owner
+    ? '방을 없애고 처음 화면으로 돌아갑니다 (다른 사람도 함께 나갑니다)'
+    : '대기실에서 나가 처음 화면으로 돌아갑니다';
+
   $('lobbyWait').hidden = v.isHost || v.serverless;
   $('lobbyPrivate').hidden = !v.lobby.opts?.privateShares;
   const reconnecting = v.status && v.status !== 'ok';
@@ -1077,6 +1138,18 @@ $('chatForm').addEventListener('submit', e => {
 });
 
 $('logToggle').onclick = () => { ui.logAll = !ui.logAll; render(); };
+
+$('btnLobbyBack').onclick = exitLobby;
+
+// 모바일 뒤로가기(제스처 포함) — 사이트를 떠나는 대신 나가기 흐름으로 받는다.
+// 취소할 수 있어야 하므로 일단 같은 자리에 다시 붙잡아 둔다.
+window.addEventListener('popstate', () => {
+  if (!room) return;                       // 이미 나온 상태 — 평소대로 뒤로 간다
+  const v = room.view();
+  history.pushState({ acq: v.state ? 'game' : 'lobby' }, '', location.href);
+  if (!v.state) { exitLobby(); return; }
+  if (confirm('게임에서 나갑니다. 진행 중이면 다른 사람이 대신 진행할 수 있습니다. 나갈까요?')) leaveRoom();
+});
 
 $('btnLeave').onclick = () => {
   if (!confirm('방에서 나갑니다. 게임이 진행 중이면 다른 사람이 대신 진행할 수 있습니다. 나갈까요?')) return;
