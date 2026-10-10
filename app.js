@@ -19,6 +19,7 @@ const ui = {
   selTile: null, buy: {}, dispose: { sell: 0, trade: 0 }, tab: 'info',
   lastTile: null, prevBoard: null,
   seenEvent: 0,     // 팝업으로 이미 보여준 이벤트 번호
+  eventInit: false, // 첫 렌더에서 '지난 사건'의 기준을 잡았는지
   seenChat: 0,      // 이미 읽은 채팅 번호
   unread: 0,        // 안 읽은 채팅 수
   chatInit: false,  // 첫 렌더에서 기존 대화를 '읽음'으로 처리했는지
@@ -108,7 +109,7 @@ function leaveRoom() {
   releaseWakeLock = null;
   Object.assign(ui, {
     selTile: null, buy: {}, dispose: { sell: 0, trade: 0 },
-    seenEvent: 0, seenChat: 0, chatInit: false, unread: 0, wasMyTurn: false,
+    seenEvent: 0, eventInit: false, seenChat: 0, chatInit: false, unread: 0, wasMyTurn: false,
     prevHandBy: {}, newTilesBy: {}, lastPlacedBy: {}, curMe: -1, logAll: false,
     endAsked: false, endShown: false, prevBoard: null, lastTile: null,
   });
@@ -470,7 +471,19 @@ function renderAction(v) {
         cancel.onclick = () => { ui.selTile = null; render(); };
         row.append(go, cancel);
       } else if (playable.length === 0) {
-        const pass = el('button', 'btn btn-primary', '놓을 수 있는 타일이 없음 — 턴 넘기기');
+        // 놓을 곳이 없어도 주식은 살 수 있다. 손패 교체는 턴당 한 번.
+        const canSwap = !state.swapped && (state.bagCount ?? 0) > 0;
+        pane.append(el('div', 'action-hint', canSwap
+          ? '지금 놓을 수 있는 타일이 없습니다. 손패를 한 번 바꿔 보거나, 그냥 주식 구매로 넘어갈 수 있습니다.'
+          : (state.swapped
+            ? '바꾼 손패도 놓을 곳이 없습니다. 주식만 사고 넘어가세요.'
+            : '지금 놓을 수 있는 타일이 없습니다. 주식 구매로 넘어갈 수 있습니다.')));
+        if (canSwap) {
+          const swap = el('button', 'btn btn-primary', `🔄 손패 ${me.hand.length}장 전부 바꾸기`);
+          swap.onclick = () => room.localAct({ type: 'swap' });
+          row.append(swap);
+        }
+        const pass = el('button', 'btn' + (canSwap ? '' : ' btn-primary'), '타일 놓지 않고 주식 구매로 →');
         pass.onclick = () => room.localAct({ type: 'pass' });
         row.append(pass);
       }
@@ -862,6 +875,15 @@ function popupFound(ev) {
   FX.popup({ node, tone: 'found', ms: 4500, sound: FX.alert2 });
 }
 
+// 손패 교체 — 왜 저 사람 타일이 통째로 바뀌었는지 모두가 알 수 있게
+function popupSwap(ev) {
+  const node = el('div', 'fx-card');
+  node.append(el('div', 'fx-kicker', '손패 교체'));
+  node.append(el('div', 'fx-title', `${ev.by} 님이 ${ev.count}장을 바꿨습니다`));
+  node.append(el('div', 'fx-empty', '놓을 수 있는 타일이 하나도 없어 손패를 전부 물리고 새로 뽑았습니다.'));
+  FX.popup({ node, tone: 'swap', ms: 3000, sound: FX.alert2 });
+}
+
 // 주식 구매 — 모두가 보도록 화면 중앙에 띄운다.
 // 매 턴 일어나므로 짧게 두고, 아무 데나 누르면 바로 닫힌다.
 function popupBuy(ev) {
@@ -1006,16 +1028,17 @@ function drainEvents(v) {
   // 되돌리기로 이벤트가 지워졌으면 기준 번호도 함께 낮춘다 (다시 놓으면 또 알리도록)
   const maxN = events.length ? Math.max(...events.map(e => e.n)) : 0;
   if (ui.seenEvent > maxN) ui.seenEvent = maxN;
-  if (ui.seenEvent === 0 && events.length) {
-    // 처음 들어왔거나 재접속한 경우 — 지난 사건을 몰아서 띄우지 않는다
-    ui.seenEvent = Math.max(...events.map(e => e.n));
-  }
+  // 처음 들어왔거나 재접속한 경우 — 들어오기 전 사건을 몰아서 띄우지 않는다.
+  // '아직 기준을 안 잡음'과 '0번까지 봤음'은 다르다. 섞으면 새 게임의 첫 사건
+  // (대개 첫 상장)이 통째로 묻힌다.
+  if (!ui.eventInit) { ui.eventInit = true; ui.seenEvent = maxN; }
   for (const ev of events.filter(e => e.n > ui.seenEvent).sort((a, b) => a.n - b.n)) {
     ui.seenEvent = ev.n;
     if (ev.type === 'payout') popupPayout(ev);
     else if (ev.type === 'safe') popupSafe(ev);
     else if (ev.type === 'found') popupFound(ev);
     else if (ev.type === 'buy') popupBuy(ev);
+    else if (ev.type === 'swap') popupSwap(ev);
     else if (ev.type === 'disposeStart') popupDisposeStart(ev);
     else if (ev.type === 'disposed') popupDisposed(ev);
   }

@@ -687,6 +687,8 @@ test('가방이 비고 아무도 놓을 수 없으면 게임이 자동으로 끝
   s.players[2].hand = [];
   assert.equal(E.tileStatus(s, T('1B')), 'dead');
   must(E.applyAction(s, 0, { type: 'pass' }));
+  assert.equal(s.phase, 'buy');            // 못 놓아도 주식은 살 수 있다
+  must(E.applyAction(s, 0, { type: 'buy', picks: {} }));
   assert.equal(s.ended, true);
   assert.equal(s.phase, 'over');
   assert.ok(s.results.length === 3);
@@ -703,6 +705,86 @@ test('가방에 타일이 남아 있으면 죽은 타일을 바꿔 주고 계속
   assert.equal(E.applyAction(s, 0, { type: 'pass' }).ok, false);
   assert.deepEqual(s.players[0].hand, [T('5G')]);
   assert.equal(s.ended, false);
+});
+
+console.log('\n놓을 수 없을 때');
+
+// 체인 7개를 모두 올려 둔 판 — 새 체인을 못 만들어 '지금은 못 놓는' 타일이 생긴다
+function sevenChains(hand) {
+  const s = blank(['A', 'B', 'C']);
+  // 7개 체인을 2칸씩, 서로 떨어뜨려 놓는다
+  const spots = [['1A', '2A'], ['4A', '5A'], ['7A', '8A'], ['10A', '11A'],
+                 ['1C', '2C'], ['4C', '5C'], ['7C', '8C']];
+  E.CHAIN_IDS.forEach((id, i) => spots[i].forEach(n => { s.board[T(n)] = id; }));
+  // 아래쪽에 독립 타일을 흩어 둔다 — 그 옆칸은 '8번째 체인'이 되어 지금은 못 놓는다
+  ['1I', '4I', '7I', '10I'].forEach(n => { s.board[T(n)] = 'orphan'; });
+  s.players[0].hand = hand.map(T);
+  s.players.forEach((p, i) => { if (i) p.hand = []; });
+  return s;
+}
+// 위 판에서 '지금은 못 놓는' 타일들 (독립 타일에 닿지만 체인에는 안 닿는 칸)
+const BLOCKED = ['2I', '3I', '5I', '6I', '8I', '9I', '11I', '1H', '4H', '7H', '10H'].map(T);
+
+test('놓을 수 있는 타일이 없으면 주식 구매 단계로 간다 (턴이 그냥 끝나지 않는다)', () => {
+  const s = sevenChains(['2I']);               // 1I 옆 — 8번째 체인이라 막힘
+  assert.equal(E.tileStatus(s, T('2I')), 'blocked');
+  assert.equal(E.playableTiles(s, s.players[0].hand).length, 0);
+  must(E.applyAction(s, 0, { type: 'pass' }));
+  assert.equal(s.phase, 'buy');
+  assert.equal(s.turn, 0);                     // 아직 내 턴
+  // 실제로 살 수 있어야 한다
+  must(E.applyAction(s, 0, { type: 'buy', picks: { tower: 2 } }));
+  assert.equal(s.players[0].shares.tower, 2);
+  assert.equal(s.turn, 1);                     // 사고 나면 턴이 넘어간다
+});
+
+test('놓을 수 있는 타일이 있으면 넘길 수 없다', () => {
+  const s = sevenChains(['6E']);               // 아무것도 안 닿는 빈 칸 — 놓을 수 있다
+  assert.equal(E.applyAction(s, 0, { type: 'pass' }).ok, false);
+  assert.equal(E.applyAction(s, 0, { type: 'swap' }).ok, false);
+});
+
+test('전부 못 놓으면 손패를 한 번 바꿀 수 있다', () => {
+  const s = sevenChains(['2I', '3I', '5I', '6I', '8I', '9I']);   // 손패 6장 전부 막힘
+  s.bag = BLOCKED.filter(t => !s.players[0].hand.includes(t));
+  const before = s.players[0].hand.slice();
+  const total = before.length + s.bag.length;
+  must(E.applyAction(s, 0, { type: 'swap' }));
+  assert.equal(s.players[0].hand.length, before.length);         // 다시 6장
+  assert.notDeepEqual(s.players[0].hand, before);                // 내용은 달라졌다
+  assert.equal(s.phase, 'place');                                // 바꾼 뒤에도 내 차례 그대로
+  // 돌려놓은 타일은 버리지 않고 가방에 섞인다 (지금만 못 놓는 타일이므로)
+  assert.equal(s.players[0].hand.length + s.bag.length, total);
+  const all = [...s.players[0].hand, ...s.bag];
+  before.forEach(t => assert.ok(all.includes(t), `${E.tileName(t)} 가 사라졌다`));
+});
+
+test('손패 교체는 턴당 한 번', () => {
+  const s = sevenChains(['2I', '3I']);
+  s.bag = BLOCKED.filter(t => !s.players[0].hand.includes(t));   // 바꿔 봐야 또 못 놓는다
+  must(E.applyAction(s, 0, { type: 'swap' }));
+  assert.equal(E.playableTiles(s, s.players[0].hand).length, 0);
+  const second = E.applyAction(s, 0, { type: 'swap' });
+  assert.equal(second.ok, false);
+  assert.match(second.error, /이미/);
+});
+
+test('가방이 비었으면 손패를 바꿀 수 없다', () => {
+  const s = sevenChains(['2I']);
+  s.bag = [];
+  const r = E.applyAction(s, 0, { type: 'swap' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /가방/);
+});
+
+test('턴이 넘어가면 교체 기회가 다시 생긴다', () => {
+  const s = sevenChains(['2I', '3I']);
+  s.bag = BLOCKED.filter(t => !s.players[0].hand.includes(t));
+  must(E.applyAction(s, 0, { type: 'swap' }));
+  assert.equal(s.swapped, true);
+  must(E.applyAction(s, 0, { type: 'pass' }));
+  must(E.applyAction(s, 0, { type: 'buy', picks: {} }));
+  assert.equal(s.swapped, false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

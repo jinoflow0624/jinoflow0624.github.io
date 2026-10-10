@@ -234,6 +234,7 @@ export function createGame(entries, seed = Date.now(), opts = {}) {
     pendingFound: null,
     merger: null,
     buy: null,
+    swapped: false,     // 이번 턴에 손패를 바꿨는지 (턴당 한 번)
     log: [],
     events: [],
     safeSeen: [],
@@ -324,6 +325,7 @@ function takeUndoSnapshot(state, playerIdx) {
     merger: state.merger ? JSON.parse(JSON.stringify(state.merger)) : null,
     pendingFound: state.pendingFound ? { ...state.pendingFound } : null,
     buy: state.buy ? { ...state.buy } : null,
+    swapped: !!state.swapped,
     safeSeen: (state.safeSeen || []).slice(),
     logSeq: state.logSeq || 0,
     eventSeq: state.eventSeq || 0,
@@ -353,6 +355,7 @@ function actUndo(state, playerIdx) {
   state.merger = u.merger;
   state.pendingFound = u.pendingFound;
   state.buy = u.buy;
+  state.swapped = !!u.swapped;
   state.safeSeen = u.safeSeen.slice();
   // 되돌린 수가 남긴 기록과 팝업을 지운다
   state.log = state.log.filter(e => e.n <= u.logSeq);
@@ -377,6 +380,7 @@ export function applyAction(state, playerIdx, action) {
     dispose: actDispose,
     buy: actBuy,
     pass: actPass,
+    swap: actSwap,
     undo: actUndo,
   };
   const fn = handlers[action.type];
@@ -700,8 +704,35 @@ function actPass(state, playerIdx) {
   const player = state.players[playerIdx];
   replaceDeadTiles(state, player);
   if (playableTiles(state, player.hand).length > 0) return fail('놓을 수 있는 타일이 있습니다.');
-  log(state, `${player.name}: 놓을 수 있는 타일이 없어 턴을 넘김`);
-  return endTurn(state);
+  log(state, `${player.name}: 놓을 수 있는 타일이 없어 타일을 놓지 않음`);
+  // 타일을 못 놓는 것과 주식을 사는 것은 별개다 — 구매 단계로 넘겨 준다
+  return toBuyPhase(state);
+}
+
+// 전부 놓을 수 없을 때, 턴당 한 번 손패를 통째로 바꾼다.
+// 영구히 못 쓰는 타일(dead)은 턴 시작마다 자동 교체되므로, 여기서 바뀌는 것은
+// '지금은' 못 놓는 타일(체인 7개가 다 올라와 새 체인을 못 만드는 경우)이다.
+// 나중에 쓸 수 있는 타일이라 버리지 않고 가방에 도로 섞는다 — 다시 뽑힐 수도 있다.
+function actSwap(state, playerIdx) {
+  if (state.phase !== 'place') return fail('지금은 타일을 바꿀 수 없습니다.');
+  if (playerIdx !== state.turn) return fail('당신의 차례가 아닙니다.');
+  const player = state.players[playerIdx];
+  replaceDeadTiles(state, player);
+  if (playableTiles(state, player.hand).length > 0) return fail('놓을 수 있는 타일이 있습니다.');
+  if (state.swapped) return fail('이번 턴에는 이미 손패를 바꿨습니다.');
+  if (state.bag.length === 0) return fail('가방에 남은 타일이 없습니다.');
+
+  const old = player.hand;
+  player.hand = [];
+  // 상태만 가지고 같은 결과가 나오도록 섞는다 (모든 참가자가 같은 판을 본다)
+  const rand = mulberry32((state.seed ^ ((state.logSeq || 0) * 0x9E3779B1)) >>> 0);
+  for (const t of old) state.bag.splice(Math.floor(rand() * (state.bag.length + 1)), 0, t);
+  refill(state, player);
+  state.swapped = true;
+  state.undo = null;   // 가방을 섞은 뒤라 되돌릴 수 없다
+  log(state, `${player.name}: 놓을 수 있는 타일이 없어 손패 ${old.length}장을 교체`);
+  emit(state, { type: 'swap', by: player.name, count: old.length });
+  return ok();
 }
 
 function endTurn(state) {
@@ -709,6 +740,7 @@ function endTurn(state) {
   const player = state.players[state.turn];
   refill(state, player);
   state.buy = null;
+  state.swapped = false;   // 손패 교체 기회는 턴마다 한 번
   state.turn = (state.turn + 1) % state.players.length;
   const next = state.players[state.turn];
   replaceDeadTiles(state, next);
